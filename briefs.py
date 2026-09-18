@@ -120,7 +120,22 @@ def generate(kind, rows):
     payload = {'model': os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b'),
                'messages': [{'role': 'system', 'content': common},
                             {'role': 'user', 'content': f'北京时间：{dt.datetime.now(CN).date()}\n{task}\n材料：{json.dumps(selected, ensure_ascii=False)}'}],
-               'response_format': {'type': 'json_object'}, 'max_completion_tokens': 5000,
+               'response_format': {'type': 'json_schema', 'json_schema': {
+                   'name': 'daily_brief', 'strict': True, 'schema': {
+                       'type': 'object', 'additionalProperties': False,
+                       'required': ['items'], 'properties': {'items': {
+                           'type': 'array', 'items': {
+                               'type': 'object', 'additionalProperties': False,
+                               'required': ['title', 'body', 'source_ids'],
+                               'properties': {
+                                   'title': {'type': 'string'},
+                                   'body': {'type': 'string'},
+                                   'source_ids': {'type': 'array', 'items': {'type': 'integer'}}
+                               }
+                           }
+                       }}
+                   }
+               }}, 'max_completion_tokens': 5000, 'reasoning_effort': 'low',
                'temperature': 0.5}
     for attempt in range(3):
         try:
@@ -133,10 +148,28 @@ def generate(kind, rows):
             items = json.loads(result['message']['content'])['items']
             return render(kind, items, selected)
         except urllib.error.HTTPError as e:
+            # Only expose known error categories, never raw messages, prompts or keys.
+            try:
+                error = json.loads(e.read(100000)).get('error', {})
+                error_code = error.get('code', '')
+            except Exception:
+                error_code = ''
+            labels = {
+                'json_validate_failed': 'JSON格式生成失败',
+                'model_not_found': '模型不存在或账号无权访问',
+                'context_length_exceeded': '输入超过模型长度限制',
+                'rate_limit_exceeded': '调用额度或速率限制',
+                'invalid_api_key': '模型密钥无效',
+                'invalid_request_error': '模型请求参数不兼容',
+            }
+            detail = labels.get(error_code, '未识别的请求错误')
+            if e.code == 400 and error_code == 'json_validate_failed' and attempt < 2:
+                time.sleep(60)
+                continue
             if e.code == 429 and attempt < 2:
                 time.sleep(60)
                 continue
-            raise RuntimeError(f'模型服务请求失败，HTTP {e.code}；未切换付费服务') from None
+            raise RuntimeError(f'模型服务请求失败，HTTP {e.code}（{detail}）；未切换付费服务') from None
     raise RuntimeError('模型限额不足')
 
 
